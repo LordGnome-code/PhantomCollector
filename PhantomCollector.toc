@@ -1,0 +1,7 @@
+## Interface: 16001
+## Title: PhantomCollector
+## Notes: Trade contact ledger, debt tracking, and scheduled interest.
+## Author: Phantom
+## Version: 1.0.0
+## SavedVariables: PhantomCollectorDB
+PhantomCollector.lua
