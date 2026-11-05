@@ -505,7 +505,7 @@ confirmClearNoDebt=function(btn)
 end
 
 local function makeSettings()
-  local s=makePanel("PhantomCollectorSettings",365,330)
+  local s=makePanel("PhantomCollectorSettings",365,350)
   s.title:SetText("PhantomCollector Settings")
   label(s,"Color palette",16,-52)
   s.themeBtn=button(s,"",185,25,155,-47,function()
@@ -534,13 +534,20 @@ local function makeSettings()
     DB.tradeNotice=not DB.tradeNotice
     s.tradeBtn:SetText(DB.tradeNotice and "Enabled" or "Disabled")
   end)
-  local help=label(s,"Click a trade contact to open their borrower profile.\nDefault interest applies to new debts only; each\nborrower can be set to Compound or Simple.\nMonthly intervals use 30 days.",16,-218,329)
+  label(s,"Minimap button",16,-210)
+  s.minimapBtn=button(s,"",185,25,155,-205,function()
+    DB.minimap.hide=not DB.minimap.hide
+    s.minimapBtn:SetText(DB.minimap.hide and "Hidden" or "Shown")
+    if PC.updateMinimap then PC.updateMinimap() end
+  end)
+  local help=label(s,"Click a trade contact to open their borrower profile.\nDefault interest applies to new debts only; each\nborrower can be set to Compound or Simple.\nDrag the minimap button to move it.",16,-252,329)
   help:SetTextColor(0.85,0.85,0.9)
   s:SetScript("OnShow",function()
     s.themeBtn:SetText(palettes[DB.palette].name)
     s.channelBtn:SetText(DB.channel)
     s.compoundBtn:SetText(DB.compound and "Compounding" or "Simple")
     s.tradeBtn:SetText(DB.tradeNotice and "Enabled" or "Disabled")
+    s.minimapBtn:SetText(DB.minimap.hide and "Hidden" or "Shown")
     theme(s)
   end)
   return s
@@ -548,10 +555,7 @@ end
 local function makeMain()
   ui=makePanel("PhantomCollectorMain",700,479)
   ui.title:SetText("PhantomCollector  |  Debt Ledger")
-  button(ui,"Settings",88,23,565,-40,function()
-    if not PC.settings then PC.settings=makeSettings() end
-    if PC.settings:IsShown() then PC.settings:Hide() else PC.settings:Show() end
-  end)
+  button(ui,"Settings",88,23,565,-40,function() PC.toggleSettings() end)
   ui.status=label(ui,"",15,-47,300)
   local d=ui:CreateTexture(nil,"ARTWORK")
   d:SetPoint("TOPLEFT",ui,"TOPLEFT",255,-77);d:SetSize(2,371);ui.divider=d
@@ -601,7 +605,7 @@ local function makeMain()
   button(ui,"Announce",125,28,413,-365,function() announce(selectedKey) end)
   ui.forgiveBtn=button(ui,"Forgive Debt",125,28,550,-365,function(self) confirmForgive(self) end)
   label(ui,"Editing the owed balance restarts its interest period.",275,-413,390)
-  local hint=label(ui,"/pc toggle  |  /pc add NAME  |  Click a name for statistics",275,-443,406)
+  local hint=label(ui,"/pc  |  /pc add NAME  |  /pc minimap  |  Click a name for stats",275,-443,406)
   hint:SetTextColor(0.75,0.75,0.8)
   ui:SetScript("OnShow",function() theme(ui);setFields(selectedKey) end)
   local elapsed=0
@@ -622,6 +626,73 @@ end
 local function toggleMain()
   if not ui then makeMain() end
   if ui:IsShown() then ui:Hide() else ui:Show() end
+end
+local function toggleSettings()
+  if not PC.settings then PC.settings=makeSettings() end
+  if PC.settings:IsShown() then PC.settings:Hide() else PC.settings:Show() end
+end
+PC.toggleSettings=toggleSettings
+
+-- Minimap button: left-click opens the ledger, right-click opens settings,
+-- drag to move it around the minimap edge (position is saved).
+local minimapBtn
+local function positionMinimap()
+  local a=math.rad(DB.minimap.angle or 200)
+  local r=(Minimap:GetWidth()/2)+10
+  minimapBtn:ClearAllPoints()
+  minimapBtn:SetPoint("CENTER",Minimap,"CENTER",math.cos(a)*r,math.sin(a)*r)
+end
+local function makeMinimapButton()
+  if minimapBtn or not Minimap then return end
+  local b=CreateFrame("Button","PhantomCollectorMinimapButton",Minimap)
+  b:SetSize(31,31);b:SetFrameStrata("MEDIUM");b:SetFrameLevel(8)
+  b:RegisterForClicks("LeftButtonUp","RightButtonUp");b:RegisterForDrag("LeftButton")
+  b:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+  local bg=b:CreateTexture(nil,"BACKGROUND")
+  bg:SetTexture("Interface\\Minimap\\UI-Minimap-Background");bg:SetSize(20,20)
+  bg:SetPoint("TOPLEFT",b,"TOPLEFT",7,-5)
+  local icon=b:CreateTexture(nil,"ARTWORK")
+  icon:SetSize(20,20);icon:SetPoint("TOPLEFT",b,"TOPLEFT",7,-5)
+  -- The Auctioneer tracking art is a gold money bag; fall back to a bag icon.
+  if icon:SetTexture("Interface\\Minimap\\Tracking\\Auctioneer")==false then
+    icon:SetTexture(ICON);icon:SetTexCoord(0.08,0.92,0.08,0.92)
+  end
+  b.icon=icon
+  local border=b:CreateTexture(nil,"OVERLAY")
+  border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder");border:SetSize(53,53)
+  border:SetPoint("TOPLEFT",b,"TOPLEFT",0,0)
+  b:SetScript("OnClick",function(_,btn)
+    if btn=="RightButton" then toggleSettings() else toggleMain() end
+  end)
+  b:SetScript("OnDragStart",function(self)
+    self:SetScript("OnUpdate",function()
+      local mx,my=Minimap:GetCenter()
+      local cx,cy=GetCursorPosition()
+      local scale=Minimap:GetEffectiveScale()
+      DB.minimap.angle=math.deg(math.atan2(cy/scale-my,cx/scale-mx))
+      positionMinimap()
+    end)
+  end)
+  b:SetScript("OnDragStop",function(self) self:SetScript("OnUpdate",nil) end)
+  b:SetScript("OnEnter",function(self)
+    GameTooltip:SetOwner(self,"ANCHOR_LEFT")
+    GameTooltip:AddLine("PhantomCollector")
+    local n,total=0,0
+    for _,e in pairs(DB.debts) do n=n+1;total=total+accrue(e) end
+    GameTooltip:AddLine(string.format("%d active debts  |  %s owed",n,moneyText(total)),1,1,1)
+    GameTooltip:AddLine("Left-click: open ledger",0.8,0.8,0.8)
+    GameTooltip:AddLine("Right-click: settings",0.8,0.8,0.8)
+    GameTooltip:AddLine("Drag: move button",0.8,0.8,0.8)
+    GameTooltip:Show()
+  end)
+  b:SetScript("OnLeave",function() GameTooltip:Hide() end)
+  minimapBtn=b
+end
+PC.updateMinimap=function()
+  makeMinimapButton()
+  if not minimapBtn then return end
+  positionMinimap()
+  if DB.minimap.hide then minimapBtn:Hide() else minimapBtn:Show() end
 end
 local function detectTrade()
   local targetName
@@ -656,6 +727,7 @@ PC:SetScript("OnEvent",function(self,event,...)
     DB.channel=DB.channel or "SAY"
     if DB.compound==nil then DB.compound=true end
     if DB.tradeNotice==nil then DB.tradeNotice=true end
+    DB.minimap=DB.minimap or {angle=200,hide=false}
     -- v3: lock existing debts to the interest type they used before interest
     -- type became per-borrower, so changing the default can't alter them.
     for _,e in pairs(DB.debts) do
@@ -671,8 +743,13 @@ PC:SetScript("OnEvent",function(self,event,...)
         local key=ensure(arg,false)
         if not ui then makeMain() end
         ui:Show();setFields(key);openProfile(key)
+      elseif sub=="minimap" then
+        DB.minimap.hide=not DB.minimap.hide
+        PC.updateMinimap()
+        whisper("Minimap button "..(DB.minimap.hide and "hidden" or "shown")..".")
       else toggleMain() end
     end
+    PC.updateMinimap()
     whisper("Ready. /pc opens your ledger; click a trade contact for their borrower profile.")
   elseif event=="TRADE_SHOW" and DB then
     detectTrade()

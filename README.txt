@@ -1,7 +1,8 @@
 PhantomCollector for WoW Forever (Interface 16001)
 
 Install: Extract the PhantomCollector folder into _classic_beta_/Interface/AddOns/
-Open: /pc or /phantomcollector
+Open: /pc or /phantomcollector, or click the money-bag minimap button (right-click for Settings, drag to move).
+Hide/show the minimap button: /pc minimap or Settings > Minimap button.
 
 1. Opening a trade remembers a trade contact (it does NOT assume a loan was made).
 2. Select a contact or enter a character name and click Add / Select.
