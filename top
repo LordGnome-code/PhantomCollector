@@ -1,0 +1,213 @@
+local ADDON = ...
+local PC = CreateFrame("Frame", "PhantomCollectorEventFrame")
+local DB, ui, profile, selectedKey
+local MAX_COPPER = 999999999999
+local ICON = "Interface\\Icons\\INV_Misc_Bag_10"
+
+local palettes = {
+  {name="Phantom Purple", bg={0.095,0.075,0.14}, accent={0.68,0.45,0.96}},
+  {name="Emerald", bg={0.055,0.12,0.11}, accent={0.21,0.82,0.54}},
+  {name="Crimson", bg={0.14,0.065,0.075}, accent={0.92,0.32,0.38}},
+  {name="Ocean", bg={0.055,0.09,0.16}, accent={0.30,0.67,0.97}},
+  {name="Gold", bg={0.14,0.115,0.065}, accent={0.96,0.76,0.31}},
+  {name="Slate", bg={0.085,0.095,0.11}, accent={0.72,0.78,0.85}},
+}
+local intervals = {
+  {name="Hourly", seconds=3600},
+  {name="Daily", seconds=86400},
+  {name="Weekly", seconds=604800},
+  {name="Biweekly", seconds=1209600},
+  {name="Monthly (30 days)", seconds=2592000},
+  {name="Custom (hours)", seconds=3600},
+}
+
+local function now() return time() end
+local function clean(s) return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
+local function clampInt(v, low, high)
+  local n = tonumber(v) or 0
+  if n ~= n then n = 0 end
+  n = math.floor(n)
+  return math.max(low or 0, math.min(high or MAX_COPPER, n))
+end
+local function money(g, s, c)
+  return clampInt(g,0,99999999)*10000 + clampInt(s,0,99)*100 + clampInt(c,0,99)
+end
+local function splitMoney(v)
+  v = clampInt(v,0,MAX_COPPER)
+  return math.floor(v/10000), math.floor(v/100)%100, v%100
+end
+local function moneyText(v)
+  local g,s,c=splitMoney(v)
+  return string.format("%dg %ds %dc",g,s,c)
+end
+local function me()
+  return (UnitName("player") or "Unknown") .. "-" .. (GetRealmName() or "Realm")
+end
+local function fullName(name)
+  name=clean(name)
+  if name=="" then return nil end
+  if not string.find(name,"-",1,true) then return name.."-"..(GetRealmName() or "Realm") end
+  return name
+end
+local function shortName(name) return (name or ""):match("^([^-]+)") or name or "?" end
+local function fmtDate(t)
+  if not t then return "Never" end
+  return date("%Y-%m-%d %H:%M", t)
+end
+local function whisper(s)
+  if DEFAULT_CHAT_FRAME then DEFAULT_CHAT_FRAME:AddMessage("|cffbb88ffPhantomCollector:|r "..s) end
+end
+local function periodSeconds(entry)
+  local p=intervals[entry.period or 2] or intervals[2]
+  if entry.period==6 then return clampInt(entry.customHours or 24,1,100000)*3600 end
+  return p.seconds
+end
+-- Each debt stores its own interest type; DB.compound is only the default for new debts.
+local function isCompound(entry)
+  if entry and entry.compound~=nil then return entry.compound end
+  return DB.compound~=false
+end
+local function typeName(compound) return compound and "Compound" or "Simple" end
+local function accrue(entry)
+  if not entry then return 0,0 end
+  local principal=clampInt(entry.principal or 0,0,MAX_COPPER)
+  local rate=math.max(0, math.min(1000, tonumber(entry.rate) or 0))/100
+  local steps=math.max(0,math.floor((now()-(entry.started or now()))/periodSeconds(entry)))
+  local raw
+  if not isCompound(entry) then raw=principal*(1+rate*steps)
+  else raw=principal*((1+rate)^steps) end
+  if raw~=raw or raw==math.huge or raw>MAX_COPPER then raw=MAX_COPPER end
+  return math.floor(raw+0.5),steps
+end
+
+local function ensure(name,fromTrade)
+  local key=fullName(name)
+  if not key then return nil end
+  local c=DB.contacts[key]
+  if not c then
+    c={name=key, firstSeen=now(), lastSeen=now(), trader=false, tradeCount=0}
+    DB.contacts[key]=c
+  end
+  c.name=key
+  c.firstSeen=c.firstSeen or c.lastSeen or now()
+  local isNewTrade=false
+  if fromTrade then
+    -- TRADE_SHOW also schedules a delayed recipient check: don't double count it.
+    if not c.lastTradeAt or now()-c.lastTradeAt>=2 then
+      isNewTrade=true
+      c.tradeCount=(c.tradeCount or 0)+1
+      c.lastTradeAt=now()
+    end
+    c.trader=true
+    c.lastSeen=now()
+  end
+  return key, isNewTrade
+end
+
+local function historyFor(key)
+  DB.history[key]=DB.history[key] or {}
+  return DB.history[key]
+end
+local function logEvent(key,kind,amount,notes)
+  local h=historyFor(key)
+  table.insert(h,1,{at=now(),kind=kind,amount=clampInt(amount or 0,0,MAX_COPPER),notes=notes})
+  while #h>40 do table.remove(h) end
+end
+local function statsFor(key)
+  local s=DB.borrowers[key]
+  if not s then
+    s={borrowed=0,repaid=0,interestGenerated=0,forgiven=0,
+      loans=0,payments=0,writeoffs=0}
+    DB.borrowers[key]=s
+    local old=DB.debts[key]
+    if old then
+      -- Version 1.0 saved only the latest principal, not earlier transactions.
+      -- Import that as an opening loan, without inventing prior history.
+      s.borrowed=clampInt(old.principal or 0,0,MAX_COPPER)
+      s.loans=1
+      s.firstLoan=old.started or now()
+      s.lastLoan=old.started or now()
+      s.imported=true
+      logEvent(key,"Opening balance",s.borrowed,"Imported from v1.0")
+    end
+  end
+  return s
+end
+local function theme(frame)
+  if not frame then return end
+  local p=palettes[DB.palette or 1] or palettes[1]
+  frame.bg:SetColorTexture(p.bg[1],p.bg[2],p.bg[3],0.98)
+  frame.head:SetColorTexture(p.accent[1],p.accent[2],p.accent[3],0.82)
+  frame.title:SetTextColor(1,1,1)
+  if frame.divider then frame.divider:SetColorTexture(p.accent[1],p.accent[2],p.accent[3],0.65) end
+end
+local function label(parent,text,x,y,width)
+  local t=parent:CreateFontString(nil,"OVERLAY","GameFontNormal")
+  t:SetPoint("TOPLEFT",parent,"TOPLEFT",x,y)
+  if width then t:SetWidth(width);t:SetJustifyH("LEFT") end
+  t:SetText(text)
+  return t
+end
+local function button(parent,text,w,h,x,y,fn)
+  local b=CreateFrame("Button",nil,parent,"UIPanelButtonTemplate")
+  b:SetSize(w,h);b:SetPoint("TOPLEFT",parent,"TOPLEFT",x,y);b:SetText(text)
+  b:SetScript("OnClick",fn)
+  return b
+end
+local function edit(parent,w,x,y,onlyNumeric)
+  local e=CreateFrame("EditBox",nil,parent,"InputBoxTemplate")
+  e:SetSize(w,24);e:SetPoint("TOPLEFT",parent,"TOPLEFT",x,y);e:SetAutoFocus(false)
+  if onlyNumeric then e:SetNumeric(true) end
+  e:SetScript("OnEscapePressed",function(self) self:ClearFocus() end)
+  e:SetScript("OnEnterPressed",function(self) self:ClearFocus() end)
+  return e
+end
+local function makePanel(name,w,h)
+  local f=CreateFrame("Frame",name,UIParent,"BackdropTemplate")
+  f:SetSize(w,h);f:SetPoint("CENTER");f:SetFrameStrata("DIALOG");f:SetClampedToScreen(true)
+  f:SetMovable(true);f:EnableMouse(true);f:RegisterForDrag("LeftButton")
+  f:SetScript("OnDragStart",f.StartMoving);f:SetScript("OnDragStop",f.StopMovingOrSizing)
+  local bg=f:CreateTexture(nil,"BACKGROUND");bg:SetAllPoints();f.bg=bg
+  local head=f:CreateTexture(nil,"BORDER")
+  head:SetPoint("TOPLEFT",1,-1);head:SetPoint("TOPRIGHT",-1,-1);head:SetHeight(32);f.head=head
+  local icon=f:CreateTexture(nil,"ARTWORK")
+  icon:SetTexture(ICON);icon:SetSize(24,24);icon:SetPoint("TOPLEFT",f,"TOPLEFT",7,-5);f.icon=icon
+  f.title=label(f,"PhantomCollector",38,-9,w-90)
+  local close=CreateFrame("Button",nil,f,"UIPanelCloseButton")
+  close:SetPoint("TOPRIGHT",f,"TOPRIGHT",2,1)
+  f:Hide()
+  return f
+end
+
+local function sortedKeys()
+  local keys={}
+  for k in pairs(DB.contacts) do keys[#keys+1]=k end
+  table.sort(keys,function(a,b) return a:lower()<b:lower() end)
+  return keys
+end
+local function populate()
+  if not ui then return end
+  local contacts=sortedKeys()
+  local debts=0
+  for _ in pairs(DB.debts) do debts=debts+1 end
+  ui.status:SetText(string.format("%d contacts | %d active debts",#contacts,debts))
+  for i=1,#ui.rows do
+    local key=contacts[i+ui.offset]
+    local b=ui.rows[i]
+    if key then
+      local e=DB.debts[key]
+      local caption=shortName(key)
+      if e then caption=caption.."  |cffffd372"..moneyText(accrue(e)).."|r" end
+      if key==selectedKey then caption="|cff82ffc5> |r"..caption end
+      b:SetText(caption);b.key=key;b:Show()
+    else b.key=nil;b:Hide() end
+  end
+  if #contacts==0 then ui.page:SetText("0 of 0")
+  else ui.page:SetText(string.format("%d-%d of %d",math.min(#contacts,ui.offset+1),math.min(#contacts,ui.offset+#ui.rows),#contacts)) end
+end
+
+-- Editors are shared by the main ledger and the borrower profile.
+-- Custom-hours controls are completely hidden unless Custom (hours) is selected.
+local function setPeriod(editor,period)
+  if editor.period==6 and editor.hours:GetText()~="" then
+    editor.cust
