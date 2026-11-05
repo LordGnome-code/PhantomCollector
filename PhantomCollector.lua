@@ -2,6 +2,7 @@ local ADDON = ...
 local PC = CreateFrame("Frame", "PhantomCollectorEventFrame")
 local DB, ui, profile, selectedKey
 local MAX_COPPER = 999999999999
+local ICON = "Interface\\Icons\\INV_Misc_Bag_10"
 
 local palettes = {
   {name="Phantom Purple", bg={0.095,0.075,0.14}, accent={0.68,0.45,0.96}},
@@ -61,13 +62,19 @@ local function periodSeconds(entry)
   if entry.period==6 then return clampInt(entry.customHours or 24,1,100000)*3600 end
   return p.seconds
 end
+-- Each debt stores its own interest type; DB.compound is only the default for new debts.
+local function isCompound(entry)
+  if entry and entry.compound~=nil then return entry.compound end
+  return DB.compound~=false
+end
+local function typeName(compound) return compound and "Compound" or "Simple" end
 local function accrue(entry)
   if not entry then return 0,0 end
   local principal=clampInt(entry.principal or 0,0,MAX_COPPER)
   local rate=math.max(0, math.min(1000, tonumber(entry.rate) or 0))/100
   local steps=math.max(0,math.floor((now()-(entry.started or now()))/periodSeconds(entry)))
   local raw
-  if DB.compound==false then raw=principal*(1+rate*steps)
+  if not isCompound(entry) then raw=principal*(1+rate*steps)
   else raw=principal*((1+rate)^steps) end
   if raw~=raw or raw==math.huge or raw>MAX_COPPER then raw=MAX_COPPER end
   return math.floor(raw+0.5),steps
@@ -163,7 +170,9 @@ local function makePanel(name,w,h)
   local bg=f:CreateTexture(nil,"BACKGROUND");bg:SetAllPoints();f.bg=bg
   local head=f:CreateTexture(nil,"BORDER")
   head:SetPoint("TOPLEFT",1,-1);head:SetPoint("TOPRIGHT",-1,-1);head:SetHeight(32);f.head=head
-  f.title=label(f,"PhantomCollector",12,-9,w-70)
+  local icon=f:CreateTexture(nil,"ARTWORK")
+  icon:SetTexture(ICON);icon:SetSize(24,24);icon:SetPoint("TOPLEFT",f,"TOPLEFT",7,-5);f.icon=icon
+  f.title=label(f,"PhantomCollector",38,-9,w-90)
   local close=CreateFrame("Button",nil,f,"UIPanelCloseButton")
   close:SetPoint("TOPRIGHT",f,"TOPRIGHT",2,1)
   f:Hide()
@@ -216,6 +225,10 @@ end
 local function cyclePeriod(editor)
   setPeriod(editor,(editor.period % #intervals)+1)
 end
+local function setCompound(editor,compound)
+  editor.compound=compound and true or false
+  editor.compoundBtn:SetText(typeName(editor.compound))
+end
 local function fillEditor(editor,key)
   editor.loading=true
   local e=key and DB.debts[key]
@@ -228,6 +241,7 @@ local function fillEditor(editor,key)
   editor.customHours=e and e.customHours or 24
   editor.period=0 -- do not import stale values from the previous selected borrower
   setPeriod(editor,e and e.period or 2)
+  if e then setCompound(editor,isCompound(e)) else setCompound(editor,DB.compound~=false) end
   editor.loading=false
   editor.amountDirty=false
 end
@@ -259,13 +273,13 @@ local function readEditor(editor)
   if not editor.amountDirty and selectedKey and DB.debts[selectedKey] then
     balance=accrue(DB.debts[selectedKey])
   end
-  return balance,rate,editor.period,hours
+  return balance,rate,editor.period,hours,editor.compound
 end
 
-local refreshProfileStats, setFields
+local refreshProfileStats, setFields, confirmClearNoDebt
 local function saveFrom(editor)
   if not selectedKey then whisper("Select or add a character first.");return end
-  local balance,rate,period,hours=readEditor(editor)
+  local balance,rate,period,hours,compound=readEditor(editor)
   if balance==nil then return end
   local key=selectedKey
   local previous=DB.debts[key]
@@ -288,11 +302,12 @@ local function saveFrom(editor)
     stats.payments=(stats.payments or 0)+1
     stats.lastPayment=now()
     logEvent(key,"Balance reduction",-diff)
-  elseif previous and (rate~=previous.rate or period~=previous.period or (period==6 and hours~=(previous.customHours or 24))) then
-    logEvent(key,"Interest terms changed",0,string.format("%s%% %s",tostring(rate),intervals[period].name))
+  elseif previous and (rate~=previous.rate or period~=previous.period or compound~=isCompound(previous)
+      or (period==6 and hours~=(previous.customHours or 24))) then
+    logEvent(key,"Interest terms changed",0,string.format("%s%% %s %s",tostring(rate),intervals[period].name,typeName(compound):lower()))
   end
   if balance>0 then
-    DB.debts[key]={principal=balance,rate=rate,period=period,customHours=hours,
+    DB.debts[key]={principal=balance,rate=rate,period=period,customHours=hours,compound=compound,
       started=now(),creditor=previous and previous.creditor or me()}
     whisper("Saved "..shortName(key)..". Current balance and interest start are updated.")
   else
@@ -342,8 +357,8 @@ local function announce(key)
   local p=(intervals[e.period or 2] or intervals[2]).name:lower()
   if e.period==6 then p="every "..tostring(e.customHours or 24).." hours" end
   local interestDue=math.max(0,total-clampInt(e.principal or 0,0,MAX_COPPER))
-  local message=string.format("%s owes %s %s (base %s + %s accrued interest; %.2f%% %s; %d periods since %s).",
-    shortName(key),shortName(e.creditor or me()),moneyText(total),moneyText(e.principal),moneyText(interestDue),e.rate or 0,p,steps,date("%Y-%m-%d",e.started or now()))
+  local message=string.format("%s owes %s %s (base %s + %s accrued interest; %.2f%% %s %s; %d periods since %s).",
+    shortName(key),shortName(e.creditor or me()),moneyText(total),moneyText(e.principal),moneyText(interestDue),e.rate or 0,typeName(isCompound(e)):lower(),p,steps,date("%Y-%m-%d",e.started or now()))
   local channel=DB.channel or "SAY"
   if channel=="PARTY" and (not IsInGroup or not IsInGroup()) then whisper("Not in a party.");return end
   if channel=="RAID" and (not IsInRaid or not IsInRaid()) then whisper("Not in a raid.");return end
@@ -383,6 +398,8 @@ local function makeProfile()
   profile.periodBtn=button(profile,"Daily",168,24,450,-305,function() cyclePeriod(profile) end)
   profile.hoursLabel=label(profile,"Custom hours",450,-340,100)
   profile.hours=edit(profile,70,548,-335,true)
+  label(profile,"Interest type",18,-340)
+  profile.compoundBtn=button(profile,"Compound",120,24,123,-335,function() setCompound(profile,not profile.compound) end)
   local note=label(profile,"Edit the amount currently owed. Saving restarts the interest period; changes are recorded in history.",18,-374,606)
   note:SetTextColor(0.82,0.82,0.88)
   button(profile,"Save Changes",142,28,18,-400,function() saveFrom(profile) end)
@@ -460,6 +477,33 @@ setFields=function(key)
   populate()
 end
 
+-- Removes contacts with no active debt. Borrower stats/history are kept, so
+-- re-adding a cleared player brings their profile back.
+local function clearNoDebt()
+  local removed=0
+  for key in pairs(DB.contacts) do
+    if not DB.debts[key] then DB.contacts[key]=nil;removed=removed+1 end
+  end
+  if ui then ui.offset=0 end
+  if selectedKey and not DB.contacts[selectedKey] then
+    if profile and profile:IsShown() then profile:Hide() end
+    setFields(nil)
+  else
+    populate()
+  end
+  whisper(string.format("Cleared %d contact%s with no active debt.",removed,removed==1 and "" or "s"))
+end
+confirmClearNoDebt=function(btn)
+  if btn.confirming and now()-(btn.confirmAt or 0)<=10 then
+    btn.confirming=nil;btn:SetText("Clear No-Debt")
+    clearNoDebt()
+  else
+    btn.confirming=true;btn.confirmAt=now()
+    btn:SetText("Confirm Clear")
+    whisper("Click Confirm Clear again within 10 seconds to remove every contact without an active debt.")
+  end
+end
+
 local function makeSettings()
   local s=makePanel("PhantomCollectorSettings",365,330)
   s.title:SetText("PhantomCollector Settings")
@@ -475,18 +519,22 @@ local function makeSettings()
     local cur=1;for i,v in ipairs(order) do if DB.channel==v then cur=i end end
     DB.channel=order[cur%#order+1];s.channelBtn:SetText(DB.channel)
   end)
-  label(s,"Interest calculation",16,-130)
+  label(s,"Default interest",16,-130)
   s.compoundBtn=button(s,"",185,25,155,-125,function()
     DB.compound=not DB.compound
     s.compoundBtn:SetText(DB.compound and "Compounding" or "Simple")
-    setFields(selectedKey);refreshProfileStats()
+    -- Only changes the default for new debts; existing debts keep their own type.
+    if not (selectedKey and DB.debts[selectedKey]) then
+      setFields(selectedKey)
+      if profile and profile:IsShown() then fillEditor(profile,selectedKey) end
+    end
   end)
   label(s,"Trade reminders",16,-170)
   s.tradeBtn=button(s,"",185,25,155,-165,function()
     DB.tradeNotice=not DB.tradeNotice
     s.tradeBtn:SetText(DB.tradeNotice and "Enabled" or "Disabled")
   end)
-  local help=label(s,"Click a trade contact to open their borrower profile.\nOnly Custom (hours) shows the custom-hours field.\nBalance edits keep a persistent transaction history.\nMonthly intervals use 30 days.",16,-218,329)
+  local help=label(s,"Click a trade contact to open their borrower profile.\nDefault interest applies to new debts only; each\nborrower can be set to Compound or Simple.\nMonthly intervals use 30 days.",16,-218,329)
   help:SetTextColor(0.85,0.85,0.9)
   s:SetScript("OnShow",function()
     s.themeBtn:SetText(palettes[DB.palette].name)
@@ -507,7 +555,8 @@ local function makeMain()
   ui.status=label(ui,"",15,-47,300)
   local d=ui:CreateTexture(nil,"ARTWORK")
   d:SetPoint("TOPLEFT",ui,"TOPLEFT",255,-77);d:SetSize(2,371);ui.divider=d
-  label(ui,"Trade contacts (click for profile)",15,-87,236)
+  label(ui,"Trade contacts",15,-87,110)
+  ui.clearBtn=button(ui,"Clear No-Debt",110,22,126,-82,function(self) confirmClearNoDebt(self) end)
   ui.rows={};ui.offset=0
   for i=1,11 do
     local b=button(ui,"",224,25,12,-108-(i-1)*27,function(self)
@@ -544,6 +593,8 @@ local function makeMain()
   ui.periodBtn=button(ui,"Daily",150,24,525,-231,function() cyclePeriod(ui) end)
   ui.hoursLabel=label(ui,"Custom hours",275,-274)
   ui.hours=edit(ui,78,381,-269,true)
+  label(ui,"Type",480,-274)
+  ui.compoundBtn=button(ui,"Compound",150,24,525,-269,function() setCompound(ui,not ui.compound) end)
   ui.created=label(ui,"No active debt",275,-310,374)
   ui.current=label(ui,"Current owed: 0g 0s 0c",275,-333,390)
   button(ui,"Save Debt",125,28,275,-365,function() saveFrom(ui) end)
@@ -605,7 +656,12 @@ PC:SetScript("OnEvent",function(self,event,...)
     DB.channel=DB.channel or "SAY"
     if DB.compound==nil then DB.compound=true end
     if DB.tradeNotice==nil then DB.tradeNotice=true end
-    DB.version=2
+    -- v3: lock existing debts to the interest type they used before interest
+    -- type became per-borrower, so changing the default can't alter them.
+    for _,e in pairs(DB.debts) do
+      if e.compound==nil then e.compound=DB.compound~=false end
+    end
+    DB.version=3
   elseif event=="PLAYER_LOGIN" then
     SLASH_PHANTOMCOLLECTOR1="/pc"
     SLASH_PHANTOMCOLLECTOR2="/phantomcollector"
