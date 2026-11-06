@@ -10,8 +10,9 @@ Hide/show the minimap button: /pc minimap or Settings > Minimap button.
    Interest type is set per borrower, so one person can compound while another uses simple interest.
 4. Use Announce to post the debt into your selected chat channel (SAY, PARTY, RAID, GUILD).
 5. Use Settings to customize color palette, the default interest type for new debts, and show/hide the trade prompt.
-6. Clear No-Debt (above the contact list) removes every contact without an active debt. Click it twice within
-   10 seconds to confirm. Borrowing history is kept and reappears if you add that player again.
+6. Clear No-Debt (above the contact list) removes contacts with no current debt AND no borrowing history
+   (people with past loans or forgiven debts are kept). Click it twice within
+   10 seconds to confirm.
 
 Interest is applied once per COMPLETE configured interval (compound: on the running balance; simple: on the original principal), based on the original start time. Interest calculations are derived from the stored principal and start date; they do not depend on continuous login. Monthly periods are approximated as 30 days. Custom interval is an integer number of hours.
 

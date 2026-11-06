@@ -477,12 +477,28 @@ setFields=function(key)
   populate()
 end
 
--- Removes contacts with no active debt. Borrower stats/history are kept, so
--- re-adding a cleared player brings their profile back.
+-- True if this person has any saved borrowing record: past loans, payments,
+-- interest, forgiven debts, or history entries. Opening a profile creates an
+-- empty stats record, so that alone doesn't count.
+local function hasHistory(key)
+  local h=DB.history[key]
+  if h and #h>0 then return true end
+  local s=DB.borrowers[key]
+  if not s then return false end
+  return (s.borrowed or 0)>0 or (s.repaid or 0)>0 or (s.forgiven or 0)>0
+    or (s.interestGenerated or 0)>0 or (s.loans or 0)>0 or (s.payments or 0)>0
+    or (s.writeoffs or 0)>0
+end
+
+-- Removes contacts with no active debt AND no saved history (trade-only
+-- contacts). Anyone with past loans or forgiven debts is kept.
 local function clearNoDebt()
   local removed=0
   for key in pairs(DB.contacts) do
-    if not DB.debts[key] then DB.contacts[key]=nil;removed=removed+1 end
+    if not DB.debts[key] and not hasHistory(key) then
+      DB.contacts[key]=nil;removed=removed+1
+      DB.borrowers[key]=nil -- empty stats record from viewing the profile
+    end
   end
   if ui then ui.offset=0 end
   if selectedKey and not DB.contacts[selectedKey] then
@@ -491,7 +507,7 @@ local function clearNoDebt()
   else
     populate()
   end
-  whisper(string.format("Cleared %d contact%s with no active debt.",removed,removed==1 and "" or "s"))
+  whisper(string.format("Cleared %d contact%s with no debt and no history.",removed,removed==1 and "" or "s"))
 end
 confirmClearNoDebt=function(btn)
   if btn.confirming and now()-(btn.confirmAt or 0)<=10 then
@@ -500,7 +516,7 @@ confirmClearNoDebt=function(btn)
   else
     btn.confirming=true;btn.confirmAt=now()
     btn:SetText("Confirm Clear")
-    whisper("Click Confirm Clear again within 10 seconds to remove every contact without an active debt.")
+    whisper("Click Confirm Clear again within 10 seconds to remove every contact with no debt and no borrowing history.")
   end
 end
 
@@ -728,6 +744,15 @@ PC:SetScript("OnEvent",function(self,event,...)
     if DB.compound==nil then DB.compound=true end
     if DB.tradeNotice==nil then DB.tradeNotice=true end
     DB.minimap=DB.minimap or {angle=200,hide=false}
+    -- Older Clear No-Debt also removed people with forgiven/past debts from
+    -- the contact list (their history was kept). Put them back in the list.
+    for _,tbl in ipairs({DB.history,DB.borrowers}) do
+      for key in pairs(tbl) do
+        if not DB.contacts[key] and hasHistory(key) then
+          DB.contacts[key]={name=key,firstSeen=now(),lastSeen=now(),trader=false,tradeCount=0}
+        end
+      end
+    end
     -- v3: lock existing debts to the interest type they used before interest
     -- type became per-borrower, so changing the default can't alter them.
     for _,e in pairs(DB.debts) do
